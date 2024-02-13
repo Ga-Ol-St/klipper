@@ -225,6 +225,8 @@ class PrinterExtruder:
         return self.heater
     def get_trapq(self):
         return self.trapq
+    def get_filament_area(self):
+        return self.filament_area
     def stats(self, eventtime):
         return self.heater.stats(eventtime)
     def check_move(self, move):

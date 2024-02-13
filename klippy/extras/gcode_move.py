@@ -3,7 +3,7 @@
 # Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging
+import math,logging
 
 class GCodeMove:
     def __init__(self, config):
@@ -22,9 +22,11 @@ class GCodeMove:
                                        self._handle_home_rails_end)
         self.is_printer_ready = False
         # Register g-code commands
-        gcode = printer.lookup_object('gcode')
+        self.gcode = printer.lookup_object('gcode')
+        gcode = self.gcode
+        self.extruder = printer.lookup_object('extruder', None)
         handlers = [
-            'G1', 'G20', 'G21',
+            'G0', 'G1', 'G20', 'G21',
             'M82', 'M83', 'G90', 'G91', 'G92', 'M220', 'M221',
             'SET_GCODE_OFFSET', 'SAVE_GCODE_STATE', 'RESTORE_GCODE_STATE',
         ]
@@ -32,10 +34,11 @@ class GCodeMove:
             func = getattr(self, 'cmd_' + cmd)
             desc = getattr(self, 'cmd_' + cmd + '_help', None)
             gcode.register_command(cmd, func, False, desc)
-        gcode.register_command('G0', self.cmd_G1)
         gcode.register_command('M114', self.cmd_M114, True)
         gcode.register_command('GET_POSITION', self.cmd_GET_POSITION, True,
                                desc=self.cmd_GET_POSITION_help)
+        gcode.register_command('VELOCITY_EXTRUSION', self.cmd_VELOCITY_EXTRUSION, True,
+                               desc=self.cmd_VELOCITY_EXTRUSION_help)
         self.Coord = gcode.Coord
         # G-Code coordinate manipulation
         self.absolute_coord = self.absolute_extrude = True
@@ -49,6 +52,10 @@ class GCodeMove:
         self.saved_states = {}
         self.move_transform = self.move_with_transform = None
         self.position_with_transform = (lambda: [0., 0., 0., 0.])
+        self.velocity_extrusion_enabled = False
+        self.velocity_extrusion_volume = 0.15
+        self.velocity_extrusion_auto_retract = True
+        self.velocity_extrusion_in_progress = False
     def _handle_ready(self):
         self.is_printer_ready = True
         if self.move_transform is None:
@@ -71,8 +78,10 @@ class GCodeMove:
         self.reset_last_position()
         self.extrude_factor = 1.
         self.base_position[3] = self.last_position[3]
+        self.extruder = self.printer.lookup_object('toolhead', None).get_extruder()
     def _handle_home_rails_end(self, homing_state, rails):
         self.reset_last_position()
+        self.velocity_extrusion_enabled = False
         for axis in homing_state.get_axes():
             self.base_position[axis] = self.homing_position[axis]
     def set_move_transform(self, transform, force=False):
@@ -110,18 +119,44 @@ class GCodeMove:
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
     # G-Code movement commands
+    def cmd_G0(self, gcmd):
+        if not self.velocity_extrusion_enabled:
+            self.cmd_G1(gcmd)
+            return
+        #Velocity extrusion
+        params = gcmd.get_command_parameters()
+        if 'E' in params:
+            params.pop('E', None)
+        if self.velocity_extrusion_auto_retract and self.velocity_extrusion_in_progress:
+            self.gcode.run_script_from_command("G10\n")
+            self.velocity_extrusion_in_progress = False
+        g0_cmd = self.gcode.create_gcode_command(gcmd.get_command(), gcmd.get_commandline(), params)
+        self.cmd_G1(g0_cmd)
+
+
     def cmd_G1(self, gcmd):
         # Move
         params = gcmd.get_command_parameters()
+        command = gcmd.get_command()
+        if command == 'G1' and self.velocity_extrusion_enabled:
+            if self.velocity_extrusion_auto_retract and not self.velocity_extrusion_in_progress:
+                self.gcode.run_script_from_command("G11\n")
+                self.velocity_extrusion_in_progress = True
+            params.pop('E', None)
+            # v = self.extruder.filament_area*
+
         try:
+            distance = dict()
             for pos, axis in enumerate('XYZ'):
                 if axis in params:
                     v = float(params[axis])
                     if not self.absolute_coord:
                         # value relative to position of last move
+                        distance[axis] = v
                         self.last_position[pos] += v
                     else:
                         # value relative to base coordinate position
+                        distance[axis] = v - self.last_position[pos]
                         self.last_position[pos] = v + self.base_position[pos]
             if 'E' in params:
                 v = float(params['E']) * self.extrude_factor
@@ -131,6 +166,10 @@ class GCodeMove:
                 else:
                     # value relative to base coordinate position
                     self.last_position[3] = v + self.base_position[3]
+            if command == 'G1' and self.velocity_extrusion_enabled:
+                move_distance = math.sqrt(distance.get('X', 0)**2 + distance.get('Y', 0)**2 + distance.get('Z', 0)**2)
+                v = (self.velocity_extrusion_volume / self.extruder.get_filament_area()) * self.extrude_factor * move_distance
+                self.last_position[3] += v
             if 'F' in params:
                 gcode_speed = float(params['F'])
                 if gcode_speed <= 0.:
@@ -217,6 +256,9 @@ class GCodeMove:
             'homing_position': list(self.homing_position),
             'speed': self.speed, 'speed_factor': self.speed_factor,
             'extrude_factor': self.extrude_factor,
+            'velocity_extrusion': self.velocity_extrusion_enabled,
+            'velocity_extrusion_volume': self.velocity_extrusion_volume,
+            'velocity_extrusion_retract': self.velocity_extrusion_auto_retract
         }
     cmd_RESTORE_GCODE_STATE_help = "Restore a previously saved G-Code state"
     def cmd_RESTORE_GCODE_STATE(self, gcmd):
@@ -232,6 +274,9 @@ class GCodeMove:
         self.speed = state['speed']
         self.speed_factor = state['speed_factor']
         self.extrude_factor = state['extrude_factor']
+        self.velocity_extrusion_enabled = state['velocity_extrusion']
+        self.velocity_extrusion_volume = state['velocity_extrusion_volume']
+        self.velocity_extrusion_auto_retract = state['velocity_extrusion_retract']
         # Restore the relative E position
         e_diff = self.last_position[3] - state['last_position'][3]
         self.base_position[3] += e_diff
@@ -268,9 +313,30 @@ class GCodeMove:
                           "toolhead: %s\n"
                           "gcode: %s\n"
                           "gcode base: %s\n"
-                          "gcode homing: %s"
+                          "gcode homing: %s\n"
+                          "velocity: %s\n"
+                          "vel_volume: %s\n"
+                          "vel_retra: %s"
                           % (mcu_pos, stepper_pos, kin_pos, toolhead_pos,
-                             gcode_pos, base_pos, homing_pos))
+                             gcode_pos, base_pos, homing_pos, self.velocity_extrusion_enabled,
+                             self.velocity_extrusion_volume, self.velocity_extrusion_auto_retract))
+    cmd_VELOCITY_EXTRUSION_help = (
+        "Control Velocity extrusion settings")
+    def cmd_VELOCITY_EXTRUSION(self, gcmd):
+        toolhead = self.printer.lookup_object('toolhead', None)
+        if toolhead is None:
+            raise gcmd.error("Printer not ready")
+        params = gcmd.get_command_parameters()
+        if 'VOLUME' in params:
+            self.velocity_extrusion_volume = gcmd.get_float('VOLUME', self.velocity_extrusion_volume, minval=0.)
+        if 'AUTO_RETRACT' in params:
+            self.velocity_extrusion_auto_retract = bool(gcmd.get_int(
+                'AUTO_RETRACT', self.velocity_extrusion_auto_retract, minval=0, maxval=1))
+        if 'ENABLE' in params:
+            self.velocity_extrusion_enabled = bool(gcmd.get_int(
+                'ENABLE', self.velocity_extrusion_enabled, minval=0, maxval=1))
+            if self.velocity_extrusion_enabled:
+                self.extruder = toolhead.get_extruder()
 
 def load_config(config):
     return GCodeMove(config)

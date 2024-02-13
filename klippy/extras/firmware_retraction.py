@@ -54,6 +54,7 @@ class FirmwareRetraction:
         if not self.is_retracted:
             self.gcode.run_script_from_command(
                 "SAVE_GCODE_STATE NAME=_retract_state\n"
+                "VELOCITY_EXTRUSION ENABLE=0\n"
                 "G91\n"
                 "G1 E-%.5f F%d\n"
                 "RESTORE_GCODE_STATE NAME=_retract_state"
@@ -64,6 +65,7 @@ class FirmwareRetraction:
         if self.is_retracted:
             self.gcode.run_script_from_command(
                 "SAVE_GCODE_STATE NAME=_retract_state\n"
+                "VELOCITY_EXTRUSION ENABLE=0\n"
                 "G91\n"
                 "G1 E%.5f F%d\n"
                 "RESTORE_GCODE_STATE NAME=_retract_state"
