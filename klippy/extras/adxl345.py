@@ -166,19 +166,19 @@ class AccelCommandHelper:
                           % (accel_x, accel_y, accel_z))
     cmd_ACCELEROMETER_DEBUG_READ_help = "Query register (for debugging)"
     def cmd_ACCELEROMETER_DEBUG_READ(self, gcmd):
-        reg = gcmd.get("REG", minval=0, maxval=126, parser=lambda x: int(x, 0))
+        reg = gcmd.get("REG", minval=0, maxval=127, parser=lambda x: int(x, 0))
         val = self.chip.read_reg(reg)
         gcmd.respond_info("Accelerometer REG[0x%x] = 0x%x" % (reg, val))
     cmd_ACCELEROMETER_DEBUG_WRITE_help = "Set register (for debugging)"
     def cmd_ACCELEROMETER_DEBUG_WRITE(self, gcmd):
-        reg = gcmd.get("REG", minval=0, maxval=126, parser=lambda x: int(x, 0))
+        reg = gcmd.get("REG", minval=0, maxval=127, parser=lambda x: int(x, 0))
         val = gcmd.get("VAL", minval=0, maxval=255, parser=lambda x: int(x, 0))
         self.chip.set_reg(reg, val)
 
 # Helper to read the axes_map parameter from the config
-def read_axes_map(config):
-    am = {'x': (0, SCALE_XY), 'y': (1, SCALE_XY), 'z': (2, SCALE_Z),
-          '-x': (0, -SCALE_XY), '-y': (1, -SCALE_XY), '-z': (2, -SCALE_Z)}
+def read_axes_map(config, scale_x, scale_y, scale_z):
+    am = {'x': (0, scale_x), 'y': (1, scale_y), 'z': (2, scale_z),
+          '-x': (0, -scale_x), '-y': (1, -scale_y), '-z': (2, -scale_z)}
     axes_map = config.getlist('axes_map', ('x','y','z'), count=3)
     if any([a not in am for a in axes_map]):
         raise config.error("Invalid axes_map parameter")
@@ -191,7 +191,7 @@ class ADXL345:
     def __init__(self, config):
         self.printer = config.get_printer()
         AccelCommandHelper(config, self)
-        self.axes_map = read_axes_map(config)
+        self.axes_map = read_axes_map(config, SCALE_XY, SCALE_XY, SCALE_Z)
         self.data_rate = config.getint('rate', 3200)
         if self.data_rate not in QUERY_RATES:
             raise config.error("Invalid rate parameter: %d" % (self.data_rate,))
